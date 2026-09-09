@@ -376,6 +376,8 @@ class BlockPool:
         num_cached_blocks: int,
         block_size: int,
         kv_cache_group_id: int,
+        *,
+        start_block: int = 0,
     ) -> None:
         """Generate BlockStored events for blocks reused from prefix cache.
 
@@ -385,9 +387,10 @@ class BlockPool:
 
         Args:
             request: The request whose prefix cache blocks were reused.
-            num_cached_blocks: Number of blocks that were cache hits.
+            num_cached_blocks: Exclusive end of the reused block range.
             block_size: Number of tokens per block.
             kv_cache_group_id: The KV cache group ID.
+            start_block: First reused block, for a GPU run in a mixed prefix.
         """
         if not self.enable_kv_cache_events or num_cached_blocks == 0:
             return
@@ -400,7 +403,7 @@ class BlockPool:
         cached_hashes: list[ExternalBlockHash] = []
         extra_keys_list: list[tuple[Any, ...] | None] = []
         curr_mm_idx = 0
-        for i in range(num_cached_blocks):
+        for i in range(start_block, num_cached_blocks):
             block_start = i * block_size
             block_end = block_start + block_size
             cached_hashes.append(maybe_convert_block_hash(block_hashes[i]))
@@ -412,10 +415,12 @@ class BlockPool:
         if not cached_hashes:
             return
 
-        # Prefix-cache hits always form a contiguous prefix starting at block 0,
-        # so the first (and thus the whole group's) parent block hash is None.
-        parent_block_hash: ExternalBlockHash | None = None
-        start_token_idx = 0
+        parent_block_hash = (
+            maybe_convert_block_hash(block_hashes[start_block - 1])
+            if start_block
+            else None
+        )
+        start_token_idx = start_block * block_size
         end_token_idx = num_cached_blocks * block_size
 
         logger.debug(

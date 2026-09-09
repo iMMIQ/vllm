@@ -740,33 +740,60 @@ class Scheduler(SchedulerInterface):
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
                 did_prefix_cache_lookup = False
+                joint_cache_hit = None
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     did_prefix_cache_lookup = True
-                    hit_diverged = False
-                    # Get locally-cached tokens.
-                    if self.connector is not None:
-                        # A KV connector transfers the missing suffix, which needs a
-                        # hybrid-aware lookup that can diverge across groups.
-                        (
-                            new_computed_blocks,
-                            num_new_local_computed_tokens,
-                            request.shared_prefix_boundary,
-                            hit_diverged,
-                        ) = self.kv_cache_manager.get_computed_blocks_for_connector(
-                            request
+                    if (
+                        self.connector is not None
+                        and self.kv_cache_manager.prefix_cache_lookup_enabled(request)
+                    ):
+                        joint_cache_hit = self.connector.get_joint_cache_hit(
+                            request, self.kv_cache_manager.coordinator
                         )
+                    if joint_cache_hit is not None:
+                        num_new_local_computed_tokens = (
+                            joint_cache_hit.num_gpu_prefix_tokens
+                        )
+                        num_external_computed_tokens = (
+                            joint_cache_hit.num_computed_tokens
+                            - num_new_local_computed_tokens
+                        )
+                        load_kv_async = joint_cache_hit.needs_load
+                        request.shared_prefix_boundary = (
+                            joint_cache_hit.shared_prefix_boundary
+                        )
+                        new_computed_blocks = (
+                            self.kv_cache_manager.empty_kv_cache_blocks
+                        )
+                        connector_prefix_cache_queries = request.num_tokens
+                        connector_prefix_cache_hits = joint_cache_hit.num_cpu_tokens
+                        hit_diverged = False
                     else:
-                        (
-                            new_computed_blocks,
-                            num_new_local_computed_tokens,
-                            # Marconi shared-prefix junction to pin; 0 if none.
-                            request.shared_prefix_boundary,
-                        ) = self.kv_cache_manager.get_computed_blocks(request)
+                        hit_diverged = False
+                        # Get locally-cached tokens.
+                        if self.connector is not None:
+                            # A KV connector transfers the missing suffix, which needs a
+                            # hybrid-aware lookup that can diverge across groups.
+                            (
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                                request.shared_prefix_boundary,
+                                hit_diverged,
+                            ) = self.kv_cache_manager.get_computed_blocks_for_connector(
+                                request
+                            )
+                        else:
+                            (
+                                new_computed_blocks,
+                                num_new_local_computed_tokens,
+                                # Marconi shared-prefix junction to pin; 0 if none.
+                                request.shared_prefix_boundary,
+                            ) = self.kv_cache_manager.get_computed_blocks(request)
 
                     # Get externally-cached tokens if using a KVConnector.
-                    if self.connector is not None:
+                    if self.connector is not None and joint_cache_hit is None:
                         # Present a block-aligned local hit to the connector so
                         # a strictly longer remote hit can supersede a local
                         # sub-block tail without racing its copy-on-write.
@@ -982,9 +1009,12 @@ class Scheduler(SchedulerInterface):
                     full_sequence_must_fit=self.scheduler_reserve_full_isl,
                     reserved_blocks=reserved_blocks,
                     has_scheduled_reqs=bool(self.running),
+                    joint_cache_hit=joint_cache_hit,
                 )
 
                 if new_blocks is None:
+                    if joint_cache_hit is not None:
+                        joint_cache_hit.release()
                     # The request cannot be scheduled.
 
                     # NOTE: we need to untouch the request from the encode cache
@@ -1016,7 +1046,10 @@ class Scheduler(SchedulerInterface):
                 # Record at admission so unscheduled lookups are not counted.
                 if did_prefix_cache_lookup:
                     self.kv_cache_manager.record_prefix_cache_stats(
-                        request, num_new_local_computed_tokens
+                        request,
+                        joint_cache_hit.num_gpu_tokens
+                        if joint_cache_hit is not None
+                        else num_new_local_computed_tokens,
                     )
 
                 request = request_queue.pop_request()

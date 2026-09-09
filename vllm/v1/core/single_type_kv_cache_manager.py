@@ -8,6 +8,7 @@ from typing import ClassVar
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_lookup import CacheLookup
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashListWithBlockSize,
@@ -101,6 +102,7 @@ class SingleTypeKVCacheManager(ABC):
         # This is only used to track the RUNNING requests, we do not track the
         # data for preempted ones.
         self.num_cached_block: dict[str, int] = {}
+        self._joint_cache_reused_blocks: dict[str, set[int]] = {}
 
         self.kv_cache_group_id = kv_cache_group_id
         self._null_block = block_pool.null_block
@@ -464,6 +466,16 @@ class SingleTypeKVCacheManager(ABC):
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
         )
+        if reused := self._joint_cache_reused_blocks.get(request.request_id):
+            block_mask = [
+                (block_mask is None or block_mask[i - num_cached_blocks])
+                and i not in reused
+                for i in range(num_cached_blocks, num_full_blocks)
+            ]
+            reused.difference_update(range(num_cached_blocks, num_full_blocks))
+            if not reused:
+                self._joint_cache_reused_blocks.pop(request.request_id, None)
+
         self.block_pool.cache_full_blocks(
             request=request,
             blocks=self.req_to_blocks[request.request_id],
@@ -513,6 +525,7 @@ class SingleTypeKVCacheManager(ABC):
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
+        self._joint_cache_reused_blocks.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
         return req_blocks
 
@@ -549,7 +562,7 @@ class SingleTypeKVCacheManager(ABC):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -684,7 +697,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -899,7 +912,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -1103,7 +1116,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -1282,7 +1295,7 @@ class MambaManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
@@ -1788,7 +1801,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         block_hashes: BlockHashList,
         max_length: int,
         kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
+        block_pool: CacheLookup,
         kv_cache_spec: KVCacheSpec,
         drop_eagle_block: bool,
         alignment_tokens: int,
