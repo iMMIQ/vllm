@@ -194,6 +194,28 @@ def test_transfer_hooks_pass_wait_event_for_store_only():
     assert load_calls[0]["wait_event"] is None
 
 
+@pytest.mark.parametrize("forward", [False, True])
+def test_completion_poll_submits_pending_store_once(forward):
+    """Idle steps must submit stores; forward steps must not submit twice."""
+    worker = SimpleCPUOffloadWorker(
+        vllm_config=None, kv_cache_config=None, cpu_capacity_bytes=0
+    )
+    recording = _RecordingBackend()
+    worker._backend = recording
+    worker.bind_connector_metadata(
+        SimpleCPUOffloadMetadata(
+            store_event=1, store_gpu_blocks=[1], store_cpu_blocks=[2]
+        )
+    )
+    if forward:
+        worker.wait_for_save()
+    worker.get_finished(set())
+    worker.get_finished(set())
+    assert len(recording.calls) == 1
+    assert recording.calls[0]["is_store"]
+    assert isinstance(recording.calls[0]["wait_event"], torch.Event)
+
+
 def test_build_params_src_access_order():
     """build_params defaults to ANY and honors an explicit STREAM override."""
     gpu = {"k": torch.zeros((4, 64), dtype=torch.int8, device="cuda")}
