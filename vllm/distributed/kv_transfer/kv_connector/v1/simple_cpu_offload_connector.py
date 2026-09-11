@@ -220,6 +220,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         if self.worker_handler is not None:
             self.worker_handler.wait_for_save()
 
+    def save_kv_no_forward(self) -> None:
+        self.wait_for_save()
+
     def get_finished(
         self,
         finished_req_ids: set[str],

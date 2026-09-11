@@ -196,10 +196,12 @@ def test_simple_cpu_offload_perf_latency_lazy(model: str):
 
 @pytest.mark.optional
 @pytest.mark.slow_test
+@pytest.mark.parametrize("runner_v2", [False, True])
 @create_new_process_for_each_test(method="spawn")
-def test_cancel_last_request_drains_eager_stores(monkeypatch):
+def test_cancel_last_request_drains_eager_stores(monkeypatch, runner_v2):
     """A canceled prefill must store its confirmed KV even without a forward."""
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(runner_v2)))
     llm = LLM(
         model="facebook/opt-125m",
         dtype="float16",
