@@ -6,6 +6,7 @@ import time
 
 import pytest
 
+from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVTransferConfig
 from vllm.platforms import current_platform
@@ -191,3 +192,56 @@ def test_simple_cpu_offload_perf_latency_lazy(model: str):
         _latency_test(llm, lazy=True)
     finally:
         del llm
+
+
+@pytest.mark.optional
+@pytest.mark.slow_test
+@pytest.mark.parametrize("runner_v2", [False, True])
+@create_new_process_for_each_test(method="spawn")
+def test_cancel_last_request_drains_eager_stores(monkeypatch, runner_v2):
+    """A canceled prefill must store its confirmed KV even without a forward."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(runner_v2)))
+    llm = LLM(
+        model="facebook/opt-125m",
+        dtype="float16",
+        max_model_len=256,
+        max_num_batched_tokens=128,
+        max_num_seqs=1,
+        enforce_eager=True,
+        kv_cache_memory_bytes=16 << 20,
+        gpu_memory_utilization=0.5,
+        enable_prefix_caching=True,
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"cpu_bytes_to_use": 64 << 20},
+        ),
+    )
+    engine = llm.llm_engine
+    manager = engine.engine_core.engine_core.scheduler.connector.scheduler_manager
+    prompt = TokensPrompt(prompt_token_ids=[100 + i % 100 for i in range(128)])
+    params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
+    try:
+        req_id = engine.add_request("cancel-store", prompt, params)
+        engine.step()
+        engine.abort_request([req_id], internal=True)
+        assert not engine.has_unfinished_requests()
+        assert manager._pending_finished_stores
+
+        deadline = time.monotonic() + 10
+        while manager.has_pending_stores() and time.monotonic() < deadline:
+            engine.step()
+            time.sleep(0.01)
+        assert not manager.has_pending_stores()
+        for pool in (manager._gpu_block_pool, manager.cpu_block_pool):
+            assert all(block.ref_cnt == 0 for block in pool.blocks if not block.is_null)
+
+        assert llm.reset_prefix_cache()
+        warm = llm.generate(prompt, params, use_tqdm=False)[0]
+        assert warm.num_cached_tokens > 0
+        assert llm.reset_prefix_cache(reset_connector=True)
+        cold = llm.generate(prompt, params, use_tqdm=False)[0]
+        assert warm.outputs[0].token_ids == cold.outputs[0].token_ids
+    finally:
+        engine.engine_core.shutdown()
