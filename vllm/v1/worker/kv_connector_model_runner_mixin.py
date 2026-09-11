@@ -96,8 +96,11 @@ class KVConnectorModelRunnerMixin:
         try:
             yield output
         finally:
-            if wait_for_save and not defer_finalize:
-                kv_connector.wait_for_save()
+            if not defer_finalize:
+                if wait_for_save:
+                    kv_connector.wait_for_save()
+                else:
+                    kv_connector.save_kv_no_forward()
 
             output.finished_sending, output.finished_recving = (
                 kv_connector.get_finished(scheduler_output.finished_req_ids)

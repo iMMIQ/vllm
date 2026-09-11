@@ -13,6 +13,12 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 [examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py](../../examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py)
 
+## Prefix caching with CPU offload
+
+When `SimpleCPUOffloadConnector` is configured directly, a reusable prefix can contain interleaved GPU and CPU cache blocks. GPU blocks are reused in place, and only CPU-resident blocks are loaded into newly allocated GPU blocks. If both pools contain a required block, the GPU copy is preferred.
+
+CPU loads use complete aligned blocks and finish before generation resumes. If the GPU cannot accommodate the complete matched prefix, the request waits for capacity. This lookup is enabled automatically with prefix caching; `MultiConnector` retains its existing lookup behavior.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:

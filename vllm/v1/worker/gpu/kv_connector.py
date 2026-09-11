@@ -83,6 +83,8 @@ class ActiveKVConnector(KVConnector):
         output = KVConnectorOutput()
         if wait_for_save:
             self.kv_connector.wait_for_save()
+        else:
+            self.kv_connector.save_kv_no_forward()
         output.finished_sending, output.finished_recving = (
             self.kv_connector.get_finished(finished_req_ids)
         )

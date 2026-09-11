@@ -161,10 +161,14 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         attn_metadata: "AttentionMetadata",
         **kwargs: Any,
     ) -> None:
-        pass  # Always save asynchronously and deferred to get_finished()
+        pass  # Stores are submitted asynchronously by wait_for_save().
 
     def wait_for_save(self) -> None:
-        pass  # All stores are driven by get_finished() and no wait needed
+        if self.worker_handler is not None:
+            self.worker_handler.wait_for_save()
+
+    def save_kv_no_forward(self) -> None:
+        self.wait_for_save()
 
     def get_finished(
         self,
@@ -249,8 +253,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return False, None
 
-    # NOTE: New API only for SimpleCPUOffloadConnector.
-    def has_pending_transfers(self) -> bool:
+    def has_pending_push_work(self) -> bool:
         if self.scheduler_manager is not None:
             return self.scheduler_manager.has_pending_stores()
         return False

@@ -142,8 +142,8 @@ class _RecordingBackend:
         self.calls.append({"is_store": is_store, "wait_event": wait_event})
 
 
-def test_get_finished_passes_wait_event_for_store_only():
-    """get_finished gates stores on a compute-done event but not loads."""
+def test_transfers_pass_wait_event_for_store_only():
+    """Store submission gates on a compute-done event; loads do not."""
     worker = SimpleCPUOffloadWorker(
         vllm_config=None, kv_cache_config=None, cpu_capacity_bytes=0
     )
@@ -158,6 +158,7 @@ def test_get_finished_passes_wait_event_for_store_only():
         store_cpu_blocks=[1],
     )
 
+    worker.wait_for_save()
     worker.get_finished(set())
 
     store_calls = [c for c in recording.calls if c["is_store"]]

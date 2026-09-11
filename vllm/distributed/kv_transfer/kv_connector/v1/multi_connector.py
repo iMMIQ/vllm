@@ -312,6 +312,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.wait_for_save()
 
+    def save_kv_no_forward(self) -> None:
+        for c in self._connectors:
+            c.save_kv_no_forward()
+
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:

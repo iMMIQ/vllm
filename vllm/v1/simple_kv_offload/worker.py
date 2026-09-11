@@ -58,7 +58,7 @@ class SimpleCPUOffloadWorker:
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
 
         # Compute-done event recorded before each store; reused across steps
-        # (get_finished runs once per step, copy queue is FIFO).
+        # (wait_for_save runs once per step, copy queue is FIFO).
         self._store_compute_done: torch.Event | None = None
 
         # Pending event index sets, populated in bind_connector_metadata
@@ -196,56 +196,52 @@ class SimpleCPUOffloadWorker:
         self._connector_metadata = None
 
     def start_load_kv(self) -> None:
-        # NOTE: we defer launching both load and store to get_finished(),
+        # NOTE: we defer launching loads to get_finished(),
         # which runs after model execution. This hides the CPU-side
         # block copy op overhead (~5ms) behind GPU compute.
         pass
 
     def wait_for_save(self) -> None:
-        pass
+        """Submit stores after compute, including deferred draft execution."""
+        metadata = self._connector_metadata
+        if metadata is not None and metadata.store_gpu_blocks:
+            if self._store_compute_done is None:
+                self._store_compute_done = torch.Event()
+            self._store_compute_done.record(torch.cuda.current_stream())
+            self._backend.launch_copy(
+                metadata.store_gpu_blocks,
+                metadata.store_cpu_blocks,
+                is_store=True,
+                event_idx=metadata.store_event,
+                events_list=self._store_events,
+                wait_event=self._store_compute_done,
+            )
 
     def get_finished(
         self,
         finished_req_ids: set[str],
     ) -> tuple[set[str] | None, set[str] | None]:
-        """Submit transfers and report completed events to the scheduler.
+        """Submit loads and report completed events to the scheduler.
 
-        Stores (GPU->CPU) read the live KV cache, which the compute stream may
-        still be writing under v1 overlapped execution, so they are ordered
-        after a compute-done event recorded on the current stream. Loads
-        (CPU->GPU) read stable pinned host memory and launch immediately. See
-        #45704 for the bug and #39306 for the srcAccessOrder rationale.
+        Loads read stable pinned host memory and launch immediately.
+        Stores are submitted by wait_for_save() after compute completes.
 
         Returns:
             tuple of (finished_sending, finished_recving).
             - finished_sending: always None (stores use worker metadata).
             - finished_recving: req_ids whose loads have completed.
         """
-        # (1) Submit transfers
         metadata = self._connector_metadata
-        if metadata is not None:
-            if metadata.load_cpu_blocks:
-                self._backend.launch_copy(
-                    metadata.load_cpu_blocks,
-                    metadata.load_gpu_blocks,
-                    is_store=False,
-                    event_idx=metadata.load_event,
-                    events_list=self._load_events,
-                )
-            if metadata.store_gpu_blocks:
-                if self._store_compute_done is None:
-                    self._store_compute_done = torch.Event()
-                self._store_compute_done.record(torch.cuda.current_stream())
-                self._backend.launch_copy(
-                    metadata.store_gpu_blocks,
-                    metadata.store_cpu_blocks,
-                    is_store=True,
-                    event_idx=metadata.store_event,
-                    events_list=self._store_events,
-                    wait_event=self._store_compute_done,
-                )
+        if metadata is not None and metadata.load_cpu_blocks:
+            self._backend.launch_copy(
+                metadata.load_cpu_blocks,
+                metadata.load_gpu_blocks,
+                is_store=False,
+                event_idx=metadata.load_event,
+                events_list=self._load_events,
+            )
 
-        # (2) Track completed transfer events
+        # Track completed transfer events
         finished_recving: set[str] = set()
 
         if self._pending_load_event_indices:

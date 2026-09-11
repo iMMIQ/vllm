@@ -8,7 +8,7 @@ from typing import ClassVar
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_lookup import CacheLookup
+from vllm.v1.core.kv_cache_lookup import CacheHitBlock, CacheLookup
 from vllm.v1.core.kv_cache_utils import (
     BlockHashList,
     BlockHashListWithBlockSize,
@@ -289,6 +289,46 @@ class SingleTypeKVCacheManager(ABC):
             block_idx = num_local_computed_tokens // self.block_size
             self._partial_hit_reqs[request_id] = (block_idx, new_computed_blocks[-1])
             self.num_cached_block[request_id] = block_idx
+
+    def add_joint_computed_blocks(
+        self,
+        request_id: str,
+        hits: Sequence[CacheHitBlock],
+        num_computed_tokens: int,
+    ) -> None:
+        """Adopt pinned GPU hits and allocate CPU load targets by position.
+
+        All groups' source blocks must be pinned before allocating targets.
+        CPU targets remain uncached until their transfer completes.
+        """
+        skipped_blocks = (
+            self.get_num_skipped_tokens(num_computed_tokens) // self.block_size
+        )
+        blocks = [self._null_block if hit.block.is_null else hit.block for hit in hits]
+        cpu_positions = [
+            index
+            for index, hit in enumerate(hits)
+            if index >= skipped_blocks and hit.is_cpu and not hit.block.is_null
+        ]
+        targets = (
+            self.block_pool.get_new_blocks(len(cpu_positions)) if cpu_positions else []
+        )
+        for index, target in zip(cpu_positions, targets, strict=True):
+            blocks[index] = target
+        if self._record_new_block_ids:
+            self.new_block_ids.extend(block.block_id for block in targets)
+
+        self.add_local_computed_blocks(request_id, blocks, num_computed_tokens, 0)
+        # The request now owns the targets; drop their allocation references.
+        self.block_pool.free_blocks(targets)
+        if cpu_positions:
+            first_cpu = cpu_positions[0]
+            self.num_cached_block[request_id] = first_cpu
+            self._joint_cache_reused_blocks[request_id] = {
+                index
+                for index, hit in enumerate(hits)
+                if index > first_cpu and not hit.is_cpu and not hit.block.is_null
+            }
 
     def allocate_external_computed_blocks(
         self,

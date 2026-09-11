@@ -368,6 +368,14 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def save_kv_no_forward(self) -> None:
+        """Submit stores on a step without model execution.
+
+        Called after loads start and before completion polling, with metadata
+        bound. Opt in only if saving does not require this step's forward.
+        """
+        return
+
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
