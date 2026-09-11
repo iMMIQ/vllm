@@ -64,6 +64,7 @@ class SimpleCPUOffloadWorker:
         # When the event list is empty, the hwm covers all prior events.
         self._load_hwm: int = -1
         self._store_hwm: int = -1
+        self._last_submitted_store_event: int = -1
 
         # Metadata for the current step
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
@@ -278,7 +279,11 @@ class SimpleCPUOffloadWorker:
         #45704 for the bug and #39306 for the srcAccessOrder rationale.
         """
         metadata = self._connector_metadata
-        if metadata is not None and metadata.store_gpu_blocks:
+        if (
+            metadata is not None
+            and metadata.store_gpu_blocks
+            and metadata.store_event > self._last_submitted_store_event
+        ):
             backend = self._backend
             assert backend is not None
             if self._store_compute_done is None:
@@ -292,6 +297,7 @@ class SimpleCPUOffloadWorker:
                 events_list=self._store_events,
                 wait_event=self._store_compute_done,
             )
+            self._last_submitted_store_event = metadata.store_event
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -305,6 +311,9 @@ class SimpleCPUOffloadWorker:
             - finished_sending: always None (stores use worker metadata).
             - finished_recving: req_ids whose loads have completed.
         """
+        # No-forward steps skip wait_for_save but can carry stores queued
+        # when the last request was canceled or finished.
+        self.wait_for_save()
         metadata = self._connector_metadata
         finished_recving: set[str] = set()
 
