@@ -1021,8 +1021,16 @@ class Scheduler(SchedulerInterface):
                         assert num_computed_tokens <= request.num_prompt_tokens
                         request.prefill_stats.set(
                             num_prompt_tokens=request.num_prompt_tokens,
-                            num_local_cached_tokens=num_new_local_computed_tokens,
-                            num_external_cached_tokens=num_external_computed_tokens,
+                            num_local_cached_tokens=(
+                                joint_cache_hit.num_gpu_tokens
+                                if joint_cache_hit is not None
+                                else num_new_local_computed_tokens
+                            ),
+                            num_external_cached_tokens=(
+                                joint_cache_hit.num_cpu_tokens
+                                if joint_cache_hit is not None
+                                else num_external_computed_tokens
+                            ),
                         )
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0

@@ -562,7 +562,6 @@ class KVCacheManager:
             # Cannot allocate new blocks
             return None
 
-        allocated_cpu_targets = []
         if joint_cache_hit is not None:
             if self.enable_kv_cache_events and request.kv_cache_report_mode == "full":
                 for group_idx, group in enumerate(joint_cache_hit.blocks):
@@ -586,36 +585,11 @@ class KVCacheManager:
                                 start_block=run_start,
                             )
                             run_start = None
-            materialized = []
-            for group_idx, group in enumerate(joint_cache_hit.blocks):
-                manager = self.coordinator.single_type_managers[group_idx]
-                skipped = manager.get_num_skipped_tokens(total_computed_tokens)
-                skipped_blocks = skipped // manager.block_size
-                group_blocks = []
-                reused = set()
-                first_cpu = None
-                for index, hit in enumerate(group):
-                    if index < skipped_blocks or hit.block.is_null:
-                        block = self.block_pool.null_block
-                    elif hit.is_cpu:
-                        block = self.block_pool.get_new_blocks(1)[0]
-                        allocated_cpu_targets.append(block)
-                        if manager._record_new_block_ids:
-                            manager.new_block_ids.append(block.block_id)
-                        if first_cpu is None:
-                            first_cpu = index
-                    else:
-                        block = hit.block
-                        reused.add(index)
-                    group_blocks.append(block)
-                materialized.append(group_blocks)
-                if first_cpu is not None:
-                    manager._joint_cache_reused_blocks[request.request_id] = {
-                        index for index in reused if index > first_cpu
-                    }
-            new_computed_block_list = tuple(materialized)
+            self.coordinator.allocate_joint_computed_blocks(
+                request.request_id, joint_cache_hit
+            )
 
-        if (
+        elif (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
         ):
@@ -627,21 +601,6 @@ class KVCacheManager:
                 num_local_computed_tokens=num_local_computed_tokens,
                 num_external_computed_tokens=num_external_computed_tokens,
             )
-
-        if joint_cache_hit is not None:
-            # add_local_computed_blocks adopted the new targets. Release their
-            # allocation refs, leaving only the request's ownership.
-            self.block_pool.free_blocks(allocated_cpu_targets)
-            for group_idx, group in enumerate(joint_cache_hit.blocks):
-                manager = self.coordinator.single_type_managers[group_idx]
-                req_blocks = manager.req_to_blocks[request.request_id]
-                cpu_positions = [
-                    index
-                    for index, hit in enumerate(group)
-                    if hit.is_cpu and not req_blocks[index].is_null
-                ]
-                if cpu_positions:
-                    manager.num_cached_block[request.request_id] = min(cpu_positions)
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,

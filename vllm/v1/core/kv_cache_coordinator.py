@@ -7,7 +7,7 @@ from typing import NamedTuple
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_lookup import CacheLookup
+from vllm.v1.core.kv_cache_lookup import CacheLookup, JointCacheHit
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -272,6 +272,21 @@ class KVCacheCoordinator(ABC):
                     num_local_computed_tokens,
                     num_external_computed_tokens,
                 )
+
+    def allocate_joint_computed_blocks(
+        self, request_id: str, hit: JointCacheHit
+    ) -> None:
+        """Adopt a complete joint match after its capacity check succeeds."""
+        # Lookup pins protect every group's sources before any target allocation.
+        assert hit.pinned
+        assert all(
+            request_id not in manager.num_cached_block
+            for manager in self.single_type_managers
+        )
+        for manager, blocks in zip(self.single_type_managers, hit.blocks, strict=True):
+            manager.add_joint_computed_blocks(
+                request_id, blocks, hit.num_computed_tokens
+            )
 
     def allocate_new_blocks(
         self,
