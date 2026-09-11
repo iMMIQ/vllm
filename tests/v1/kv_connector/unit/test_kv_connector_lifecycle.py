@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import nullcontext
-from types import MethodType
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -121,11 +120,15 @@ def _make_store_scheduler_output():
 
 @pytest.mark.parametrize("runner_v2", [False, True])
 @pytest.mark.parametrize("opt_in", [False, True])
-def test_idle_runner_saves_only_opted_in_connectors(store_connector, runner_v2, opt_in):
+def test_idle_runner_saves_only_opted_in_connectors(
+    store_connector, runner_v2, opt_in, monkeypatch
+):
     connector = store_connector
     if not opt_in:
-        connector.save_kv_no_forward = MethodType(
-            KVConnectorBase_V1.save_kv_no_forward, connector
+        monkeypatch.setattr(
+            SimpleCPUOffloadConnector,
+            "save_kv_no_forward",
+            KVConnectorBase_V1.save_kv_no_forward,
         )
     output = _make_store_scheduler_output()
     if runner_v2:
