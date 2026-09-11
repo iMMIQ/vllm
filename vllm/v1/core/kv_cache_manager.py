@@ -13,6 +13,7 @@ from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
     get_kv_cache_coordinator,
 )
+from vllm.v1.core.kv_cache_lookup import JointCacheHit
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
 from vllm.v1.core.single_type_kv_cache_manager import MambaManager
@@ -370,6 +371,7 @@ class KVCacheManager:
         full_sequence_must_fit: bool = False,
         reserved_blocks: int = 0,
         has_scheduled_reqs: bool = True,
+        joint_cache_hit: JointCacheHit | None = None,
     ) -> KVCacheBlocks | None:
         """Add slots for a request with new tokens to append.
 
@@ -402,6 +404,10 @@ class KVCacheManager:
                 blocks an already in-flight (prefilling) sequence is relying on.
             has_scheduled_reqs: Whether any requests are already scheduled to run
                 this step, controls whether watermark is applied.
+
+            joint_cache_hit: Optional positional GPU/CPU prefix, owned and pinned
+                by the connector. CPU positions are materialized only after
+                admission succeeds; the caller releases lookup pins afterward.
 
         Blocks layout:
         ```
@@ -459,6 +465,20 @@ class KVCacheManager:
             raise ValueError(
                 "num_new_tokens must be greater than 0 when there are no "
                 "external computed tokens"
+            )
+
+        if joint_cache_hit is not None:
+            assert request.num_computed_tokens == 0
+            assert joint_cache_hit.pinned
+            assert joint_cache_hit.num_computed_tokens == (
+                num_new_computed_tokens + num_external_computed_tokens
+            )
+            # Treat the positional prefix as a whole for sizing and attention
+            # bookkeeping. CPU placeholders are never inserted in a block pool.
+            num_new_computed_tokens = joint_cache_hit.num_computed_tokens
+            num_external_computed_tokens = 0
+            new_computed_blocks = self.create_kv_cache_blocks(
+                joint_cache_hit.allocation_blocks()
             )
 
         if new_computed_blocks is not None:
@@ -542,7 +562,34 @@ class KVCacheManager:
             # Cannot allocate new blocks
             return None
 
-        if (
+        if joint_cache_hit is not None:
+            if self.enable_kv_cache_events and request.kv_cache_report_mode == "full":
+                for group_idx, group in enumerate(joint_cache_hit.blocks):
+                    run_start = None
+                    for index in range(len(group) + 1):
+                        is_gpu = (
+                            index < len(group)
+                            and not group[index].is_cpu
+                            and not group[index].block.is_null
+                        )
+                        if is_gpu and run_start is None:
+                            run_start = index
+                        elif not is_gpu and run_start is not None:
+                            self.block_pool.emit_cached_block_events(
+                                request,
+                                index,
+                                self.coordinator.single_type_managers[
+                                    group_idx
+                                ].block_size,
+                                group_idx,
+                                start_block=run_start,
+                            )
+                            run_start = None
+            self.coordinator.allocate_joint_computed_blocks(
+                request.request_id, joint_cache_hit
+            )
+
+        elif (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
         ):
